@@ -1,0 +1,738 @@
+package com.mycompany.cp2ms1grp10;
+
+import javax.swing.*;
+import javax.swing.border.EmptyBorder;
+import javax.swing.table.DefaultTableModel;
+import javax.swing.text.AbstractDocument;
+import javax.swing.text.AttributeSet;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.DocumentFilter;
+import java.awt.*;
+import java.awt.event.FocusAdapter;
+import java.awt.event.FocusEvent;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+
+
+public class GUIAttendanceManagement extends JPanel {
+
+    private final GUIMainFrame frame;
+
+    private DefaultTableModel tableModel;
+    private JTable attendanceTable;
+
+    private final JTextField txtEmpNum = new JTextField();
+    private final JTextField txtDate   = new JTextField("MM/DD/YYYY");
+    private final JTextField txtLogIn  = new JTextField("H:MM");
+    private final JTextField txtLogOut = new JTextField("H:MM");
+
+    private final JLabel lblAutoName = new JLabel(" ");
+    private final JLabel statusLabel = new JLabel(" ");
+    private final JLabel lblFormMode = new JLabel("New Record");
+
+    // Row-action buttons
+    private JButton btnEdit;
+    private JButton btnDelete;
+
+    // Swappable action panels (normal vs edit mode)
+    private final CardLayout actionLayout = new CardLayout();
+    private final JPanel     actionCards  = new JPanel(actionLayout);
+
+    // State
+    private int     selectedRow  = -1;
+    private boolean isEditMode   = false;
+    private int     editingIndex = -1;
+
+    // Originals stored when edit starts — used for "unsaved changes" detection
+    private String origEmpNum, origDate, origLogIn, origLogOut;
+
+    // Colours — aligned with GUIEmployeeManagement palette
+    private static final Color COLOR_DELETE = new Color(180, 35, 24);
+    private static final Color COLOR_GRAY   = new Color(71, 85, 105);
+    private static final Color COLOR_GREEN  = new Color(22, 128, 93);
+
+    public GUIAttendanceManagement(GUIMainFrame frame) {
+        this.frame = frame;
+        setLayout(new BorderLayout());
+        setBackground(GUIMainFrame.COLOR_BG);
+        build();
+        refreshTable();
+
+        addPlaceholderBehavior(txtDate, "MM/DD/YYYY");
+        addPlaceholderBehavior(txtLogIn, "H:MM");
+        addPlaceholderBehavior(txtLogOut, "H:MM");
+
+        applyTimeFilter(txtEmpNum);
+        applyTimeFilter(txtLogIn);
+        applyTimeFilter(txtLogOut);
+
+        // Auto-format date as MM/DD/YYYY while typing digits
+        applyDateFilter(txtDate);
+    }
+
+    private void build() {
+        add(GUIMainFrame.makeHeaderPanel("Attendance Record Management"), BorderLayout.NORTH);
+
+        JPanel content = new JPanel(new BorderLayout(0, 12));
+        content.setBackground(GUIMainFrame.COLOR_BG);
+        content.setBorder(new EmptyBorder(15, 20, 15, 20));
+
+        // ── Table ───────────────────────────────────────────────────────────
+        String[] columns = {"Emp #", "Last Name", "First Name", "Date", "Log In", "Log Out"};
+        tableModel = new DefaultTableModel(columns, 0) {
+            public boolean isCellEditable(int r, int c) { return false; }
+        };
+
+        attendanceTable = new JTable(tableModel);
+        attendanceTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        attendanceTable.setRowHeight(22);
+
+        attendanceTable.getSelectionModel().addListSelectionListener(e -> {
+            if (e.getValueIsAdjusting()) return;
+            selectedRow = attendanceTable.getSelectedRow();
+            boolean has = selectedRow != -1 && !isEditMode;
+            btnEdit.setEnabled(has);
+            btnDelete.setEnabled(has);
+        });
+
+        content.add(new JScrollPane(attendanceTable), BorderLayout.CENTER);
+
+        // ── Form Card ───────────────────────────────────────────────────────
+        JPanel formCard = new JPanel(new BorderLayout(0, 8));
+        formCard.setBackground(Color.WHITE);
+        formCard.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(222, 228, 236)),
+                new EmptyBorder(14, 18, 14, 18)));
+
+        // Mode label
+        lblFormMode.setFont(new Font("SansSerif", Font.BOLD, 13));
+        lblFormMode.setForeground(GUIMainFrame.COLOR_PRIMARY);
+        lblFormMode.setBorder(new EmptyBorder(0, 0, 4, 0));
+        formCard.add(lblFormMode, BorderLayout.NORTH);
+
+        // ── Fields (1×4 GridLayout) ──────────────────────────────────────
+        JPanel fields = new JPanel(new GridLayout(1, 4, 10, 8));
+        fields.setBackground(Color.WHITE);
+
+        lblAutoName.setForeground(COLOR_GREEN);
+        lblAutoName.setFont(new Font("SansSerif", Font.ITALIC, 12));
+
+        fields.add(makeField("Employee Number:", txtEmpNum, lblAutoName));
+        fields.add(makeField("Date (MM/DD/YYYY):", txtDate,   null));
+        fields.add(makeField("Log In  (e.g. 8:30):", txtLogIn,  null));
+        fields.add(makeField("Log Out (e.g. 17:00):", txtLogOut, null));
+
+        txtEmpNum.addActionListener(e -> lookupEmployee());
+        txtEmpNum.addFocusListener(new FocusAdapter() {
+            public void focusLost(FocusEvent e) { lookupEmployee(); }
+        });
+
+        formCard.add(fields, BorderLayout.CENTER);
+
+        // ── Action panels (swapped via CardLayout) ───────────────────────────
+        actionCards.setBackground(Color.WHITE);
+
+        // — Normal mode buttons —
+        JPanel normalActions = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 4));
+        normalActions.setBackground(Color.WHITE);
+
+        JButton btnAdd   = GUIMainFrame.makeButton("Add Record",    GUIMainFrame.COLOR_ACCENT);
+        btnEdit          = GUIMainFrame.makeButton("Edit Record",   GUIMainFrame.COLOR_PRIMARY);
+        btnDelete        = GUIMainFrame.makeButton("Delete Record", COLOR_DELETE);
+        JButton btnClear = GUIMainFrame.makeButton("Clear Form",    COLOR_GRAY);
+        JButton btnBack  = GUIMainFrame.makeButton("Back",          GUIMainFrame.COLOR_PRIMARY);
+
+        btnEdit.setEnabled(false);
+        btnDelete.setEnabled(false);
+
+        btnAdd.addActionListener(e    -> addRecord());
+        btnEdit.addActionListener(e   -> loadRecordForEdit());
+        btnDelete.addActionListener(e -> deleteRecord());
+        btnClear.addActionListener(e  -> clearForm());
+        btnBack.addActionListener(e   -> { clearForm(); frame.displayPanel("PayrollMenu"); });
+
+        normalActions.add(btnAdd);
+        normalActions.add(btnEdit);
+        normalActions.add(btnDelete);
+        normalActions.add(btnClear);
+        normalActions.add(btnBack);
+
+        // — Edit mode buttons — Save Changes (blue) + Cancel (gray) only —
+        JPanel editActions = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 4));
+        editActions.setBackground(Color.WHITE);
+
+        JButton btnSave   = GUIMainFrame.makeButton("Save Changes", GUIMainFrame.COLOR_PRIMARY);
+        JButton btnCancel = GUIMainFrame.makeButton("Cancel",       COLOR_GRAY);
+
+        btnSave.addActionListener(e   -> saveEdit());
+        btnCancel.addActionListener(e -> handleCancelEdit());
+
+        editActions.add(btnSave);
+        editActions.add(btnCancel);
+
+        actionCards.add(normalActions, "normal");
+        actionCards.add(editActions,   "edit");
+        actionLayout.show(actionCards, "normal");
+
+        // ── Status label lives OUTSIDE the CardLayout so it is always visible ──
+        statusLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        statusLabel.setFont(new Font("SansSerif", Font.PLAIN, 12));
+
+        JPanel southPanel = new JPanel(new BorderLayout(0, 2));
+        southPanel.setBackground(Color.WHITE);
+        southPanel.add(statusLabel, BorderLayout.NORTH);
+        southPanel.add(actionCards, BorderLayout.CENTER);
+
+        formCard.add(southPanel, BorderLayout.SOUTH);
+        content.add(formCard, BorderLayout.SOUTH);
+        add(content, BorderLayout.CENTER);
+    }
+
+    // ── Field helper ────────────────────────────────────────────────────────
+
+    private JPanel makeField(String label, JTextField field, JLabel hintLabel) {
+        JPanel p = new JPanel(new BorderLayout(0, 2));
+        p.setBackground(Color.WHITE);
+
+        JLabel lbl = new JLabel(label);
+        lbl.setFont(GUIMainFrame.FONT_BOLD);
+
+        JLabel bottom = (hintLabel != null) ? hintLabel : new JLabel(" ");
+        bottom.setFont(new Font("SansSerif", Font.ITALIC, 12));
+
+        p.add(lbl,    BorderLayout.NORTH);
+        p.add(field,  BorderLayout.CENTER);
+        p.add(bottom, BorderLayout.SOUTH);
+        return p;
+    }
+
+    private void lookupEmployee() {
+        String empNum = txtEmpNum.getText().trim();
+        if (empNum.isEmpty()) { lblAutoName.setText(" "); return; }
+        for (Employee emp : DataManagement.employees) {
+            if (emp.getEmployeeNumber().equals(empNum)) {
+                lblAutoName.setText(emp.getFirstName() + " " + emp.getLastName());
+                lblAutoName.setForeground(COLOR_GREEN);
+                return;
+            }
+        }
+        lblAutoName.setText("Employee not found");
+        lblAutoName.setForeground(COLOR_DELETE);
+    }
+
+    public final void refreshTable() {
+        tableModel.setRowCount(0);
+        for (AttendanceRecord r : DataManagement.attendance) {
+            tableModel.addRow(new Object[]{
+                r.getEmployeeNumber(), r.getLastName(), r.getFirstName(),
+                r.getDate(), r.getLogIn(), r.getLogOut()
+            });
+        }
+    }
+
+    // ── Add Record ──────────────────────────────────────────────────────────
+
+    private void addRecord() {
+        String[] vals = collectAndValidate(-1);
+        if (vals == null) return;
+
+        String empNum = vals[0], lastName = vals[1], firstName = vals[2],
+               date   = vals[3], logIn   = vals[4], logOut    = vals[5];
+
+        AttendanceRecord record =
+                new AttendanceRecord(empNum, lastName, firstName, date, logIn, logOut);
+
+        if (!AttendanceDataHandler.appendAttendanceToCSV(record)) {
+            setStatus("Error saving to CSV. Check file permissions.", true);
+            return;
+        }
+
+        DataManagement.attendance.add(record);
+        refreshTable();
+        clearForm();
+        showSuccessPopup("Record Added",
+                "Attendance record for <b>" + firstName + " " + lastName + "</b><br>"
+                + "on <b>" + date + "</b> has been saved successfully.");
+        setStatus("Record added for " + firstName + " " + lastName + " on " + date, false);
+    }
+
+    // ── Edit Record ─────────────────────────────────────────────────────────
+
+    private void loadRecordForEdit() {
+        if (selectedRow == -1) return;
+
+        AttendanceRecord rec = DataManagement.attendance.get(selectedRow);
+        editingIndex = selectedRow;
+        isEditMode   = true;
+
+        origEmpNum = rec.getEmployeeNumber();
+        origDate   = rec.getDate();
+        origLogIn  = rec.getLogIn();
+        origLogOut = rec.getLogOut();
+
+        txtEmpNum.setText(origEmpNum);
+        txtDate.setForeground(new Color(31, 41, 55));
+        txtDate.setText(origDate);
+        txtLogIn.setForeground(new Color(31, 41, 55));
+        txtLogIn.setText(origLogIn);
+        txtLogOut.setForeground(new Color(31, 41, 55));
+        txtLogOut.setText(origLogOut);
+        lookupEmployee();
+
+        lblFormMode.setText("Editing Record — Emp #" + origEmpNum
+                + "  (" + rec.getFirstName() + " " + rec.getLastName()
+                + ")  on  " + origDate);
+        lblFormMode.setForeground(GUIMainFrame.COLOR_PRIMARY);
+
+        btnEdit.setEnabled(false);
+        btnDelete.setEnabled(false);
+
+        actionLayout.show(actionCards, "edit");
+        setStatus("Edit the fields below, then click Save Changes.", false);
+        txtDate.requestFocus();
+    }
+
+    private void saveEdit() {
+        String[] vals = collectAndValidate(editingIndex);
+        if (vals == null) return;
+
+        String empNum = vals[0], lastName = vals[1], firstName = vals[2],
+               date   = vals[3], logIn   = vals[4], logOut    = vals[5];
+
+        DataManagement.attendance.set(editingIndex,
+                new AttendanceRecord(empNum, lastName, firstName, date, logIn, logOut));
+
+        refreshTable();
+        showSuccessPopup("Record Updated",
+                "Attendance record for <b>" + firstName + " " + lastName + "</b><br>"
+                + "on <b>" + date + "</b> has been updated successfully.");
+        setStatus("Record updated for " + firstName + " " + lastName + " on " + date, false);
+        exitEditMode();
+    }
+
+    private void handleCancelEdit() {
+        if (hasUnsavedChanges()) {
+            boolean confirmed = showCancelConfirmPopup();
+            if (!confirmed) return;
+        }
+        exitEditMode();
+    }
+
+    private void exitEditMode() {
+        isEditMode   = false;
+        editingIndex = -1;
+        origEmpNum = origDate = origLogIn = origLogOut = null;
+
+        lblFormMode.setText("New Record");
+        lblFormMode.setForeground(GUIMainFrame.COLOR_PRIMARY);
+
+        actionLayout.show(actionCards, "normal");
+        clearForm();
+    }
+
+    private boolean hasUnsavedChanges() {
+        if (origEmpNum == null) return false;
+        return !txtEmpNum.getText().trim().equals(origEmpNum)
+            || !txtDate.getText().trim().equals(origDate)
+            || !txtLogIn.getText().trim().equals(origLogIn)
+            || !txtLogOut.getText().trim().equals(origLogOut);
+    }
+
+    // ── Delete Record ───────────────────────────────────────────────────────
+
+    private void deleteRecord() {
+        if (selectedRow == -1) return;
+
+        String empNum = tableModel.getValueAt(selectedRow, 0).toString();
+        String name   = tableModel.getValueAt(selectedRow, 2) + " "
+                      + tableModel.getValueAt(selectedRow, 1);
+        String date   = tableModel.getValueAt(selectedRow, 3).toString();
+
+        if (!showDeleteConfirmPopup(name, empNum, date)) return;
+
+        DataManagement.attendance.remove(selectedRow);
+        refreshTable();
+        clearForm();
+        setStatus("Record for " + name + " on " + date + " deleted.", false);
+    }
+
+    // ── Shared Validation ───────────────────────────────────────────────────
+
+    private String[] collectAndValidate(int skipIndex) {
+        clearInvalid(txtEmpNum);
+        clearInvalid(txtDate);
+        clearInvalid(txtLogIn);
+        clearInvalid(txtLogOut);
+
+        String empNum = txtEmpNum.getText().trim();
+        if (empNum.isEmpty()) {
+            markInvalid(txtEmpNum);
+            setStatus("Employee Number is required.", true);
+            return null;
+        }
+        if (!empNum.matches("\\d+")) {
+            markInvalid(txtEmpNum);
+            setStatus("Employee Number must contain numbers only.", true);
+            return null;
+        }
+
+        String date   = txtDate.getText().trim();
+        String logIn  = txtLogIn.getText().trim();
+        String logOut = txtLogOut.getText().trim();
+
+        // Treat placeholder text as empty
+        if (date.equals("MM/DD/YYYY"))   date   = "";
+        if (logIn.equals("H:MM"))        logIn  = "";
+        if (logOut.equals("H:MM"))       logOut = "";
+
+        if (date.isEmpty() || logIn.isEmpty() || logOut.isEmpty()) {
+            if (date.isEmpty())   markInvalid(txtDate);
+            if (logIn.isEmpty())  markInvalid(txtLogIn);
+            if (logOut.isEmpty()) markInvalid(txtLogOut);
+            setStatus("All fields are required.", true);
+            return null;
+        }
+
+        if (!date.matches("^(0[1-9]|1[0-2])/(0[1-9]|[12]\\d|3[01])/\\d{4}$")) {
+            markInvalid(txtDate);
+            setStatus("Date must be MM/DD/YYYY  (e.g. 06/03/2024)", true);
+            return null;
+        }
+
+        String lastName = "", firstName = "";
+        boolean empFound = false;
+        for (Employee emp : DataManagement.employees) {
+            if (emp.getEmployeeNumber().equals(empNum)) {
+                lastName  = emp.getLastName();
+                firstName = emp.getFirstName();
+                empFound  = true;
+                break;
+            }
+        }
+        if (!empFound) {
+            showErrorPopup("Employee Not Found",
+                    "Employee #" + empNum + " does not exist.<br>"
+                    + "Please check the employee number and try again.");
+            setStatus("Employee #" + empNum + " not found.", true);
+            return null;
+        }
+
+        for (int i = 0; i < DataManagement.attendance.size(); i++) {
+            if (i == skipIndex) continue;
+            AttendanceRecord r = DataManagement.attendance.get(i);
+            if (r.getEmployeeNumber().equals(empNum) && r.getDate().equals(date)) {
+                showErrorPopup("Duplicate Entry",
+                        "Employee #" + empNum + " already has an attendance record<br>"
+                        + "for <b>" + date + "</b>.<br>"
+                        + "Only one entry per employee per day is allowed.");
+                setStatus("Duplicate: " + empNum + " already recorded on " + date, true);
+                return null;
+            }
+        }
+
+        LocalTime tIn  = parseTime(logIn);
+        LocalTime tOut = parseTime(logOut);
+
+        if (tIn == null) {
+            markInvalid(txtLogIn);
+            setStatus("Log In must be H:MM with valid time (00:00–23:59).", true);
+            return null;
+        }
+        if (tOut == null) {
+            markInvalid(txtLogOut);
+            setStatus("Log Out must be H:MM with valid time (00:00–23:59).", true);
+            return null;
+        }
+
+        if (!tOut.isAfter(tIn)) {
+            showErrorPopup("Invalid Time",
+                    "Log Out time (<b>" + logOut + "</b>) must be later than<br>"
+                    + "Log In time (<b>" + logIn + "</b>).<br>"
+                    + "Overnight entries (past midnight) are not supported.");
+            setStatus("Log Out must be after Log In. No overnight entries.", true);
+            return null;
+        }
+
+        return new String[]{empNum, lastName, firstName, date, logIn, logOut};
+    }
+
+    // ── Popup Cards ─────────────────────────────────────────────────────────
+
+    private void showSuccessPopup(String title, String message) {
+        JOptionPane.showMessageDialog(this,
+                buildPopupCard("✔", COLOR_GREEN, message), title, JOptionPane.PLAIN_MESSAGE);
+    }
+
+    private void showErrorPopup(String title, String message) {
+        JOptionPane.showMessageDialog(this,
+                buildPopupCard("✖", COLOR_DELETE, message), title, JOptionPane.PLAIN_MESSAGE);
+    }
+
+    private boolean showCancelConfirmPopup() {
+        JPanel card = new JPanel(new BorderLayout(0, 12));
+        card.setBackground(Color.WHITE);
+        card.setPreferredSize(new Dimension(380, 148));
+
+        JPanel top = new JPanel();
+        top.setBackground(GUIMainFrame.COLOR_PRIMARY);
+        top.setBorder(new EmptyBorder(10, 0, 10, 0));
+        JLabel icon = new JLabel("⚠  Cancel Edit?");
+        icon.setFont(new Font("SansSerif", Font.BOLD, 15));
+        icon.setForeground(Color.WHITE);
+        top.add(icon);
+
+        JLabel msg = new JLabel(
+                "<html><center>Your changes have not been saved.<br>"
+                + "Are you sure you want to cancel editing?</center></html>");
+        msg.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        msg.setHorizontalAlignment(SwingConstants.CENTER);
+        msg.setBorder(new EmptyBorder(8, 16, 8, 16));
+
+        card.add(top, BorderLayout.NORTH);
+        card.add(msg, BorderLayout.CENTER);
+
+        return JOptionPane.showConfirmDialog(
+                this, card, "Discard Changes?",
+                JOptionPane.YES_NO_OPTION, JOptionPane.PLAIN_MESSAGE) == JOptionPane.YES_OPTION;
+    }
+
+    private boolean showDeleteConfirmPopup(String name, String empNum, String date) {
+        JPanel card = new JPanel(new BorderLayout(0, 12));
+        card.setBackground(Color.WHITE);
+        card.setPreferredSize(new Dimension(360, 140));
+
+        JPanel top = new JPanel();
+        top.setBackground(COLOR_DELETE);
+        top.setBorder(new EmptyBorder(10, 0, 10, 0));
+        JLabel icon = new JLabel("⚠  Confirm Delete");
+        icon.setFont(new Font("SansSerif", Font.BOLD, 15));
+        icon.setForeground(Color.WHITE);
+        top.add(icon);
+
+        JLabel msg = new JLabel(
+                "<html><center>Delete attendance record for<br>"
+                + "<b>" + name + "</b>  (#" + empNum + ")<br>"
+                + "on  <b>" + date + "</b>?<br>"
+                + "<span style='color:gray;font-size:11px'>This action cannot be undone.</span>"
+                + "</center></html>");
+        msg.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        msg.setHorizontalAlignment(SwingConstants.CENTER);
+        msg.setBorder(new EmptyBorder(6, 16, 6, 16));
+
+        card.add(top, BorderLayout.NORTH);
+        card.add(msg, BorderLayout.CENTER);
+
+        return JOptionPane.showConfirmDialog(
+                this, card, "Delete Attendance Record",
+                JOptionPane.YES_NO_OPTION, JOptionPane.PLAIN_MESSAGE) == JOptionPane.YES_OPTION;
+    }
+
+    private JPanel buildPopupCard(String iconText, Color accentColor, String message) {
+        JPanel card = new JPanel(new BorderLayout(0, 10));
+        card.setBackground(Color.WHITE);
+        card.setPreferredSize(new Dimension(360, 130));
+
+        JPanel top = new JPanel();
+        top.setBackground(accentColor);
+        top.setBorder(new EmptyBorder(8, 0, 8, 0));
+        JLabel icon = new JLabel(iconText);
+        icon.setFont(new Font("SansSerif", Font.BOLD, 20));
+        icon.setForeground(Color.WHITE);
+        top.add(icon);
+
+        JLabel msg = new JLabel("<html><center>" + message + "</center></html>");
+        msg.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        msg.setHorizontalAlignment(SwingConstants.CENTER);
+        msg.setBorder(new EmptyBorder(4, 16, 8, 16));
+
+        card.add(top,  BorderLayout.NORTH);
+        card.add(msg,  BorderLayout.CENTER);
+        return card;
+    }
+
+    // ── Utilities ────────────────────────────────────────────────────────────
+
+    private LocalTime parseTime(String input) {
+        if (input == null || !input.matches("^\\d{1,2}:\\d{2}$")) return null;
+        try {
+            return LocalTime.parse(input, DateTimeFormatter.ofPattern("H:mm"));
+        } catch (DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    private void clearForm() {
+        txtEmpNum.setText("");
+        txtDate.setText("MM/DD/YYYY");
+        txtDate.setForeground(new Color(148, 163, 184));
+        txtDate.setFont(txtDate.getFont().deriveFont(Font.ITALIC));
+        txtLogIn.setText("H:MM");
+        txtLogIn.setForeground(new Color(148, 163, 184));
+        txtLogIn.setFont(txtLogIn.getFont().deriveFont(Font.ITALIC));
+        txtLogOut.setText("H:MM");
+        txtLogOut.setForeground(new Color(148, 163, 184));
+        txtLogOut.setFont(txtLogOut.getFont().deriveFont(Font.ITALIC));
+        lblAutoName.setText(" ");
+        lblAutoName.setForeground(COLOR_GREEN);
+        statusLabel.setText(" ");
+        attendanceTable.clearSelection();
+        btnEdit.setEnabled(false);
+        btnDelete.setEnabled(false);
+        selectedRow = -1;
+
+        clearInvalid(txtEmpNum);
+        clearInvalid(txtDate);
+        clearInvalid(txtLogIn);
+        clearInvalid(txtLogOut);
+    }
+
+    private void setStatus(String msg, boolean error) {
+        statusLabel.setText(msg);
+        statusLabel.setForeground(error ? COLOR_DELETE : COLOR_GREEN);
+    }
+
+    private void markInvalid(JTextField field) {
+        field.setBackground(new Color(254, 242, 242));
+    }
+
+    private void clearInvalid(JTextField field) {
+        field.setBackground(Color.WHITE);
+    }
+
+    private void addPlaceholderBehavior(JTextField field, String placeholder) {
+        field.setForeground(new Color(148, 163, 184));
+        field.setFont(new Font("SansSerif", Font.ITALIC, 12));
+        field.setText(placeholder);
+
+        field.addFocusListener(new FocusAdapter() {
+            @Override
+            public void focusGained(FocusEvent e) {
+                clearInvalid(field);
+                if (field.getText().equals(placeholder)) {
+                    field.setText("");
+                    field.setForeground(new Color(31, 41, 55));
+                    field.setFont(new Font("SansSerif", Font.PLAIN, 12));
+                }
+            }
+
+            @Override
+            public void focusLost(FocusEvent e) {
+                if (field.getText().trim().isEmpty()) {
+                    field.setForeground(new Color(148, 163, 184));
+                    field.setFont(new Font("SansSerif", Font.ITALIC, 12));
+                    field.setText(placeholder);
+                } else {
+                    field.setForeground(new Color(31, 41, 55));
+                    field.setFont(new Font("SansSerif", Font.PLAIN, 12));
+                }
+            }
+        });
+    }
+
+    /**
+     * Auto-formats the date field as MM/DD/YYYY while the user types digits.
+     * Slashes are inserted automatically — the user only needs to type 8 digits.
+     * Typing "10252025" produces "10/25/2025".
+     */
+    private void applyDateFilter(JTextField field) {
+        ((AbstractDocument) field.getDocument()).setDocumentFilter(new DocumentFilter() {
+
+            private boolean updating = false;
+
+            @Override
+            public void insertString(FilterBypass fb, int offset,
+                                     String string, AttributeSet attr)
+                    throws BadLocationException {
+                if (updating) { super.insertString(fb, offset, string, attr); return; }
+                String current = fb.getDocument().getText(0, fb.getDocument().getLength());
+                String combined = current.substring(0, offset) + string + current.substring(offset);
+                applyFormat(fb, combined);
+            }
+
+            @Override
+            public void replace(FilterBypass fb, int offset, int length,
+                                String text, AttributeSet attrs)
+                    throws BadLocationException {
+                if (updating) { super.replace(fb, offset, length, text, attrs); return; }
+                String current = fb.getDocument().getText(0, fb.getDocument().getLength());
+                String combined = current.substring(0, offset)
+                        + (text != null ? text : "")
+                        + current.substring(offset + length);
+                applyFormat(fb, combined);
+            }
+
+            @Override
+            public void remove(FilterBypass fb, int offset, int length)
+                    throws BadLocationException {
+                if (updating) { super.remove(fb, offset, length); return; }
+                String current = fb.getDocument().getText(0, fb.getDocument().getLength());
+                String combined = current.substring(0, offset) + current.substring(offset + length);
+                applyFormat(fb, combined);
+            }
+
+            private void applyFormat(FilterBypass fb, String raw)
+                    throws BadLocationException {
+                // Keep only digits, cap at 8 (MMDDYYYY)
+                String digits = raw.replaceAll("[^0-9]", "");
+                if (digits.length() > 8) digits = digits.substring(0, 8);
+
+                // Build MM/DD/YYYY incrementally
+                StringBuilder formatted = new StringBuilder();
+                for (int i = 0; i < digits.length(); i++) {
+                    if (i == 2 || i == 4) formatted.append('/');
+                    formatted.append(digits.charAt(i));
+                }
+
+                updating = true;
+                try {
+                    super.replace(fb, 0, fb.getDocument().getLength(),
+                                  formatted.toString(), null);
+                } finally {
+                    updating = false;
+                }
+            }
+        });
+    }
+
+    private void applyTimeFilter(JTextField field) {
+        ((AbstractDocument) field.getDocument()).setDocumentFilter(new DocumentFilter() {
+
+            @Override
+            public void insertString(FilterBypass fb, int offset,
+                                     String string, AttributeSet attr)
+                    throws BadLocationException {
+                if (string == null) return;
+                String current = fb.getDocument().getText(0, fb.getDocument().getLength());
+                String newText = current.substring(0, offset) + string + current.substring(offset);
+
+                if (field == txtEmpNum) {
+                    if (newText.matches("\\d*")) super.insertString(fb, offset, string, attr);
+                } else {
+                    if (newText.matches("[0-9:]*")) super.insertString(fb, offset, string, attr);
+                }
+            }
+
+            @Override
+            public void replace(FilterBypass fb, int offset, int length,
+                                String text, AttributeSet attrs)
+                    throws BadLocationException {
+                if (text == null) return;
+                String current = fb.getDocument().getText(0, fb.getDocument().getLength());
+                String newText = current.substring(0, offset) + text + current.substring(offset + length);
+
+                if (field == txtEmpNum) {
+                    if (newText.matches("\\d*")) super.replace(fb, offset, length, text, attrs);
+                } else {
+                    if (newText.matches("[0-9:]*")) super.replace(fb, offset, length, text, attrs);
+                }
+            }
+
+            @Override
+            public void remove(FilterBypass fb, int offset, int length)
+                    throws BadLocationException {
+                super.remove(fb, offset, length);
+            }
+        });
+    }
+}
